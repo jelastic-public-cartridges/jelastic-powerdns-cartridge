@@ -1,0 +1,66 @@
+#!/bin/bash
+
+source /etc/jelastic/environment;
+
+[ ! -e /opt/repo/pid ] && mkdir /opt/repo/pid && chmod 777 /opt/repo/pid;
+[ ! -e /opt/repo/logs ] && mkdir /opt/repo/logs && chmod 777 /opt/repo/logs;
+[ ! -e /opt/repo/log ] && ln -s /opt/repo/logs /opt/repo/log;
+
+[ -f /usr/lib/systemd/system/httpd.service ] && rm -f /usr/lib/systemd/system/httpd.service;
+
+[ -e /etc/init.d/mysql ] && rm -f /etc/init.d/mysql;
+[ -e /etc/init.d/httpd ] && rm -f /etc/init.d/httpd;
+cp -f /$CARTRIDGE_HOME/versions/$Version/install/mysql /etc/init.d/mysql;
+cp -f /$CARTRIDGE_HOME/versions/$Version/install/httpd /etc/init.d/httpd;
+chmod +x /etc/init.d/mysql;
+chmod +x /etc/init.d/httpd;
+
+systemctl daemon-reload > /dev/null ;
+
+[ -d /opt/repo/db ] && sed -i '/##DB CREATION/d' $CARTRIDGE_HOME/bin/setup; 
+
+[ -f /etc/httpd/conf/httpd.conf ] && mv -f /etc/httpd/conf/httpd.conf /etc/httpd/conf/httpd.conf.old;
+cp -f /$CARTRIDGE_HOME/versions/$Version/install/httpd.conf /etc/httpd/conf/httpd.conf;
+
+yum -y localinstall $CARTRIDGE_HOME/versions/$Version/install/pdns-static-3.4.2-1.x86_64.rpm >/dev/null 2>&1
+[ -f /etc/powerdns/pdns.conf ] && { rm -f /etc/powerdns/pdns.conf; ln -s $CARTRIDGE_HOME/versions/$Version/config/pdns.conf /etc/powerdns/pdns.conf; }
+
+chmod 666 $CARTRIDGE_HOME/versions/$Version/poweradmin/inc/config.inc.php
+echo "jelastic ALL=(ALL) NOPASSWD: /sbin/service rsyslog stop, /sbin/service rsyslog start, /sbin/service rsyslog restart, /bin/chown, /usr/sbin/setcap, /usr/sbin/pdns_server, /sbin/service pdns start, /sbin/service pdns stop, /sbin/service pdns restart, /sbin/service mysqld start, /sbin/service mysqld stop, /sbin/service mysqld restart, /sbin/service mysqld reload " >> /etc/sudoers
+
+[ ! -L "/etc/httpd/conf.d/ssl.conf" ] && ln -s $CARTRIDGE_HOME/versions/$Version/install/ssl.conf /etc/httpd/conf.d/ssl.conf;
+
+sed -ie 's|; syntax:|extension=pdo_mysql.so|g' /etc/php.ini;
+service mysql start > /dev/null 2>&1; ##DB CREATION
+mysqlpass=`< /dev/urandom tr -dc A-Za-z0-9 | head -c32`; ##DB CREATION
+sed -i '/'gmysql-password='/d' $CARTRIDGE_HOME/versions/$Version/config/pdns.conf; ##DB CREATION
+sed -i "/gmysql-user=root/a gmysql-password=$mysqlpass" $CARTRIDGE_HOME/versions/$Version/config/pdns.conf; ##DB CREATION
+sed -i '/'db_pass'/d' $CARTRIDGE_HOME/versions/$Version/poweradmin/inc/config.inc.php; ##DB CREATION
+sed -i "/db_user		= 'root'/a \$db_pass  = \'$mysqlpass\';" $CARTRIDGE_HOME/versions/$Version/poweradmin/inc/config.inc.php; ##DB CREATION
+mysqladmin -u root -h localhost password $mysqlpass > /dev/null 2>&1; ##DB CREATION
+echo "GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' IDENTIFIED BY '$mysqlpass';" >> $CARTRIDGE_HOME/versions/$Version/install/power.sql; ##DB CREATION
+echo "GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost' IDENTIFIED BY '$mysqlpass';" >> $CARTRIDGE_HOME/versions/$Version/install/power.sql; ##DB CREATION
+mysql -uroot -p$mysqlpass -e "CREATE DATABASE powerdns;" > /dev/null 2>&1; ##DB CREATION
+mysql -uroot -p$mysqlpass powerdns < $CARTRIDGE_HOME/versions/$Version/install/power.sql > /dev/null 2>&1; ##DB CREATION
+mysql -uroot -p$mysqlpass powerdns < $CARTRIDGE_HOME/versions/$Version/install/powerdns.sql > /dev/null 2>&1; ##DB CREATION
+unset mysqlpass; ##DB CREATION
+service mysql stop > /dev/null 2>&1; ##DB CREATION
+
+echo "local0.info -/opt/repo/logs/pdns.info" >> /etc/rsyslog.conf;
+echo "local0.warn -/opt/repo/logs/pdns.warn" >> /etc/rsyslog.conf;
+echo "local0.err -/opt/repo/logs/pdns.err" >> /etc/rsyslog.conf;
+/sbin/service rsyslog restart 2>/dev/null 1>/dev/null;
+sed -i '/'log-error'/d' /etc/my.cnf;
+sed -i '/socket=\/var\/lib\/mysql\/mysql.sock/a log-error=\/opt\/repo\/logs\/mysqld.log' /etc/my.cnf;
+
+sed -i '/# Jelastic autoconfiguration mark/d' /etc/httpd/conf/httpd.conf;
+sed -i '/# Remove next line if you want to disable automatic Jelastic optimizations/d' /etc/httpd/conf/httpd.conf;
+
+mkdir /opt/repo/db && chmod 777 /opt/repo/db; ##DB CREATION
+mv /var/lib/mysql/* /opt/repo/db; ##DB CREATION
+[ -e /opt/repo/db ] && chown mysql:mysql /opt/repo/db;
+service mysql restart > /dev/null 2>&1;
+service mysql stop > /dev/null 2>&1;
+
+/sbin/iptables -I INPUT -p udp --dport 53 -j ACCEPT
+service iptables save > /dev/null 2>&1
